@@ -48,13 +48,26 @@ $args = array(
 	'smart_http_expire_form_nonce',
 	'purge_amp_urls',
 	'preload_cache',
+	'roles_with_purge_cap',
+	'purge_woo_products'
 );
 
 $all_inputs = array();
 
+global $wp_roles;
+$roles      = $wp_roles->roles;
+$role_names = wp_roles()->get_names();
+
 foreach ( $args as $val ) {
+
 	if ( isset( $_POST[ $val ] ) ) {
-		$all_inputs[ $val ] = wp_strip_all_tags( $_POST[ $val ] );
+
+		// If the input is an array (like roles_with_purge_cap), sanitize each value.
+		if ( is_array( $_POST[ $val ] ) ) {
+			$all_inputs[ $val ] = array_map( 'sanitize_text_field', $_POST[ $val ] );
+		} else {
+			$all_inputs[ $val ] = wp_strip_all_tags( $_POST[ $val ] );
+		}
 	}
 }
 
@@ -70,6 +83,25 @@ if ( isset( $all_inputs['smart_http_expire_save'] ) && wp_verify_nonce( $all_inp
 	$site_options = get_site_option( 'rt_wp_nginx_helper_options', array() );
 
 	foreach ( $nginx_helper_admin->nginx_helper_default_settings() as $default_setting_field => $default_setting_value ) {
+
+		if ( 'roles_with_purge_cap' === $default_setting_field ) {
+
+			$new_roles      = $nginx_settings[ $default_setting_field ];
+			$filtered_roles = array();
+
+			if ( is_array( $new_roles ) && ! empty( $new_roles ) ) {
+
+				foreach ( $nginx_settings[ $default_setting_field ] as $role_slug => $enabled ) {
+
+					$role_slug = strtolower( wp_strip_all_tags( $role_slug ) );
+					if ( '1' === $enabled && isset( $role_names[ $role_slug ] ) && ! in_array( $role_slug, array( 'administrator', 'subscriber' ), true ) ) {
+						$filtered_roles[ $role_slug ] = 1;
+					}
+				}
+			}
+			$nginx_settings[ $default_setting_field ] = $filtered_roles;
+			continue;
+		}
 
 		// Uncheck checkbox fields whose default value is `1` but user has unchecked.
 		if ( 1 === $default_setting_value && isset( $site_options[ $default_setting_field ] ) && empty( $all_inputs[ $default_setting_field ] ) ) {
@@ -215,7 +247,40 @@ if ( is_multisite() ) {
 													sprintf(
 														// translators: %s Nginx cache purge module link.
 														__( 'Uses the %s module.', 'nginx-helper' ),
-														'<strong><a href="https://github.com/FRiCKLE/ngx_cache_purge">ngx_cache_purge</a></strong>'
+														'<strong><a href="https://github.com/FRiCKLE/ngx_cache_purge">ngx_cache_purge (FRiCKLE)</a></strong>'
+													),
+													array(
+														'strong' => array(),
+														'a'      => array(
+															'href' => array(),
+														),
+													)
+												);
+											?>
+										</small>
+                  </label>
+                  <br />
+									<label for="purge_method_get_request_torden">
+										<input type="radio" value="get_request_torden" id="purge_method_get_request_torden" name="purge_method" <?php checked( $nginx_helper_settings['purge_method'], 'get_request_torden' ); ?>>
+										&nbsp;
+										<?php
+											echo wp_kses(
+												sprintf(
+													'%1$s <strong>PURGE/url</strong> %2$s',
+													esc_html__( 'Using a GET request to', 'nginx-helper' ),
+													esc_html__( '(Supports torden\'s `purge_all` method)', 'nginx-helper' )
+												),
+												array( 'strong' => array() )
+											);
+										?>
+										<br />
+										<small>
+											<?php
+												echo wp_kses(
+													sprintf(
+														// translators: %s Nginx cache purge module link.
+														__( 'Uses the %s module.', 'nginx-helper' ),
+														'<strong><a href="https://github.com/torden/ngx_cache_purge">ngx_cache_purge (torden)</a></strong>'
 													),
 													array(
 														'strong' => array(),
@@ -696,6 +761,83 @@ if ( is_multisite() ) {
 						</td>
 					</tr>
 				</table>
+				<table class="form-table rtnginx-table">
+					<tr valign="top">
+						<th scope="row">
+							<h4><?php esc_html_e( 'Select roles with purge cache access:', 'nginx-helper' ); ?></h4>
+						</th>
+						<td>
+							<table>
+								<?php
+								if ( is_array( $role_names ) && ! empty( $role_names ) ) {
+
+									foreach ( $role_names as $role_key => $name ) {
+
+										if ( 'subscriber' === $role_key ) {
+											continue;
+										}
+										$is_checked = ( 'administrator' === $role_key ) || ( isset( $nginx_helper_settings['roles_with_purge_cap'][ $role_key ] ) && 1 === (int) $nginx_helper_settings['roles_with_purge_cap'][ $role_key ] );
+										?>
+										<label for="<?php echo esc_attr( $name ); ?>">
+											<input
+											<?php
+											if ( 'administrator' === $role_key ) {
+												echo 'disabled';}
+											?>
+											type="checkbox" value="1" id="<?php echo esc_attr( $name ); ?>" name="roles_with_purge_cap[<?php echo esc_attr( $role_key ); ?>]" <?php checked( $is_checked, 1 ); ?> />
+											&nbsp;
+											<?php
+											echo esc_html( $name );
+											?>
+										</label>
+										<br />
+										<?php
+									}
+								}
+								?>
+							</table>
+						</td>
+					</tr>
+				</table>
+				<table class="form-table rtnginx-table">
+					<tr valign="top">
+						<th scope="row">
+							<h4><?php esc_html_e( 'Advance conditions:', 'nginx-helper' ); ?></h4>
+						</th>
+						<td>
+						<label for="enable_auto_purge">
+							<input
+							disabled
+							type="checkbox" id="enable_auto_purge" name="enable_auto_purge" <?php checked( NGINX_HELPER_AUTO_PURGE_ON_ANY_UPDATE, 1 ); ?> />
+							&nbsp;
+							<?php
+							esc_html_e( 'Auto Purge when Core, Plugin or Theme updates.', 'nginx-helper' );
+							?>
+						</label>
+						<p>
+						<?php
+						if ( NGINX_HELPER_AUTO_PURGE_ON_ANY_UPDATE ) {
+							echo wp_kses_post(
+								sprintf(
+									/* translators: %1$s: Filter name 'rt_wp_nginx_helper_enable_auto_purge_on_any_update' */
+									__( '(NOTE: This feature is enabled via the %1$s filter. To disable, remove this filter from your code.)', 'nginx-helper' ),
+									'<strong>rt_wp_nginx_helper_enable_auto_purge_on_any_update</strong>'
+								)
+							);
+						} else {
+							echo wp_kses_post(
+								sprintf(
+									/* translators: %1$s: Filter name 'rt_wp_nginx_helper_enable_auto_purge_on_any_update' */
+									__( '(NOTE: To enable, return true in the %1$s filter.)', 'nginx-helper' ),
+									'<strong>rt_wp_nginx_helper_enable_auto_purge_on_any_update</strong>'
+								)
+							);
+						}
+						?>
+						</p>
+						</td>
+					</tr>
+				</table>
 			</div> <!-- End of .inside -->
 		</div>
 		<div class="postbox">
@@ -942,6 +1084,25 @@ if ( is_multisite() ) {
 			</table>
 		</div> <!-- End of .inside -->
 	</div>
+	<?php if ( is_plugin_active( 'woocommerce/woocommerce.php' ) ) : ?>
+		<div class="postbox enable_purge"<?php echo empty( $nginx_helper_settings['enable_purge'] ) ? ' style="display: none;"' : ''; ?>>
+			<h3 class="hndle">
+				<span><?php esc_html_e( 'WooCommerce Options', 'nginx-helper' ); ?></span>
+			</h3>
+			<div class="inside">
+				<table class="form-table">
+					<tr valign="top">
+						<td>
+							<input type="checkbox" value="1" id="purge_woo_products" name="purge_woo_products" <?php checked( $nginx_helper_settings['purge_woo_products'] ?? 0, 1 ); ?> />
+							<label for="purge_woo_products">
+								<?php esc_html_e( 'Purge product cache on updates', 'nginx-helper' ); ?>
+							</label>
+						</td>
+					</tr>
+				</table>
+			</div> <!-- End of .inside -->
+		</div>
+	<?php endif; ?>
 	<input type="hidden" name="smart_http_expire_form_nonce" value="<?php echo esc_attr( wp_create_nonce( 'smart-http-expire-form-nonce' ) ); ?>" />
 	<?php
 		submit_button( __( 'Save All Changes', 'nginx-helper' ), 'primary large', 'smart_http_expire_save', true );

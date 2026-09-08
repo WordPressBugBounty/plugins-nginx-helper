@@ -223,8 +223,9 @@ class Nginx_Helper_Admin {
 		
 		$purge_url = add_query_arg(
 			array(
-				'nginx_helper_action' => 'purge',
-				'nginx_helper_urls'   => $nginx_helper_urls,
+				'nginx_helper_action'  => 'purge',
+				'nginx_helper_urls'    => $nginx_helper_urls,
+				'nginx_helper_dismiss' => get_transient( 'rt_wp_nginx_helper_suggest_purge_notice' ),
 			)
 		);
 		
@@ -292,9 +293,11 @@ class Nginx_Helper_Admin {
 			'redis_socket_enabled_by_constant' => 0,
 			'redis_acl_enabled_by_constant'    => 0,
 			'preload_cache'                    => 0,
-			'is_cache_preloaded'               => 0
+			'is_cache_preloaded'               => 0,
+			'roles_with_purge_cap'             => array(),
+			'purge_woo_products'               => 0,
 		);
-		
+	
 	}
     
     public function store_default_options() {
@@ -468,7 +471,7 @@ class Nginx_Helper_Admin {
 		<ul role="list">
 			<?php
 			if ( 0 === $maxitems ) {
-				echo '<li role="listitem">' . esc_html_e( 'No items', 'nginx-helper' ) . '.</li>';
+				echo '<li role="listitem">' . esc_html__( 'No items', 'nginx-helper' ) . '.</li>';
 			} else {
 				
 				// Loop through each feed item and display each item as a hyperlink.
@@ -649,9 +652,9 @@ class Nginx_Helper_Admin {
 	public function set_future_post_option_on_future_status( $new_status, $old_status, $post ) {
 		
 		global $blog_id, $nginx_purger;
-		
-		$exclude_post_types = array( 'nav_menu_item' );
-		
+
+		$exclude_post_types = apply_filters( 'rt_nginx_helper_exclude_post_types', array( 'nav_menu_item' ) );
+
 		if ( in_array( $post->post_type, $exclude_post_types, true ) ) {
 			return;
 		}
@@ -939,6 +942,191 @@ class Nginx_Helper_Admin {
 			|| 0 !== $has_import_started
 			|| ! empty( $import_query_var );
 	}
+
+	/**
+	 * Sync purge capability with selected roles.
+	 */
+	public function nginx_helper_update_role_caps() {
+		$purge_cap = 'Nginx Helper | Purge cache';
+
+		// Get all available roles.
+		$all_roles    = wp_roles()->get_names();
+		$site_options = get_site_option( 'rt_wp_nginx_helper_options', array() );
+
+		// Roles selected in settings.
+		$selected_roles = isset( $site_options['roles_with_purge_cap'] ) && is_array( $site_options['roles_with_purge_cap'] )
+			? $site_options['roles_with_purge_cap']
+			: array();
+
+		foreach ( $all_roles as $role_key => $role_name ) {
+			$role = get_role( $role_key );
+
+			if ( ! $role || 'administrator' === $role_key ) {
+				continue;
+			}
+
+			// If role is NOT selected, remove cap and continue.
+			if ( ! isset( $selected_roles[ $role_key ] ) ) {
+				$role->remove_cap( $purge_cap );
+				continue;
+			}
+
+			// If selected, make sure cap is added.
+			$role->add_cap( $purge_cap );
+		}
+	}
+
+	/**
+	 * Automatically purges Nginx cache on any WordPress core, plugin, or theme update if enabled.
+	 *
+	 * @param WP_Upgrader $upgrader_object WP_Upgrader instance.
+	 * @param array       $options Array of bulk item update data.
+	 */
+	public function nginx_helper_auto_purge_on_any_update( $upgrader_object, $options ) {
+
+		if ( ! isset( $options['action'], $options['type'] )
+			|| 'update' !== $options['action']
+			|| ! in_array( $options['type'], array( 'core', 'plugin', 'theme' ), true ) ) {
+			return;
+		}
+		if ( ! defined( 'NGINX_HELPER_AUTO_PURGE_ON_ANY_UPDATE' ) || ! NGINX_HELPER_AUTO_PURGE_ON_ANY_UPDATE ) {
+			set_transient( 'rt_wp_nginx_helper_suggest_purge_notice', true, HOUR_IN_SECONDS );
+			return;
+		}
+		global $nginx_purger;
+
+		$nginx_purger->purge_all();
+	}
+
+	/**
+	 * Displays an admin notice suggesting the user to purge cache after a WordPress update.
+	 */
+	public function suggest_purge_after_update() {
+
+		if ( ! get_transient( 'rt_wp_nginx_helper_suggest_purge_notice' ) ) {
+			return;
+		}
+
+		$setting_page  = is_network_admin() ? 'settings.php' : 'options-general.php';
+		$settings_link = network_admin_url( $setting_page . '?page=nginx' );
+		$dismiss_url   = wp_nonce_url( add_query_arg( 'nginx_helper_dismiss', 'true' ), 'nginx_helper_dismiss_notice' );
+		?>
+		<div class="notice notice-info">
+			<p>
+				<?php
+				esc_html_e( 'A WordPress update was detected. It is recommended to purge the cache to ensure your site displays the latest changes.', 'nginx-helper' );
+				?>
+				<a href="<?php echo esc_url( $settings_link ); ?>"><?php esc_html_e( 'Go & Purge Cache', 'nginx-helper' ); ?></a>
+				|
+				<a href="<?php echo esc_url( $dismiss_url ); ?>">
+				<?php esc_html_e( 'Dismiss', 'nginx-helper' ); ?>
+				</a>
+			</p>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Dismisses the "suggest purge" admin notice when the user clicks the dismiss link.
+	 */
+	public function dismiss_suggest_purge_after_update() {
+
+		if ( ! isset( $_GET['nginx_helper_dismiss'] ) || ! isset( $_GET['_wpnonce'] ) ) {
+			return;
+		}
+
+		$dismiss          = sanitize_text_field( wp_unslash( $_GET['nginx_helper_dismiss'] ) );
+		$nonce            = sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) );
+
+		// Verify the correct nonce depending on whether this is a purge+dismiss or dismiss-only request.
+		$has_purge_params = isset( $_GET['nginx_helper_action'], $_GET['nginx_helper_urls'] );
+		$nonce_verified   = $has_purge_params ? wp_verify_nonce( $nonce, 'nginx_helper-purge_all' ) : wp_verify_nonce( $nonce, 'nginx_helper_dismiss_notice' );
+
+		if ( $dismiss && $nonce_verified ) {
+
+			delete_transient( 'rt_wp_nginx_helper_suggest_purge_notice' );
+			wp_safe_redirect( remove_query_arg( array( 'nginx_helper_dismiss', '_wpnonce' ) ) );
+			exit;
+		}
+	}
+
+	/**
+	 * Initialize WooCommerce hooks if enabled.
+	 *
+	 * @since 2.3.5
+	 */
+	public function init_woocommerce_hooks() {
+		if ( ! is_plugin_active( 'woocommerce/woocommerce.php' ) || empty( $this->options['purge_woo_products'] ) ) {
+			return;
+		}
+
+		add_action( 'woocommerce_reduce_order_stock', array( $this, 'purge_product_cache_on_purchase' ), 10, 1 );
+		add_action( 'woocommerce_update_product', array( $this, 'purge_product_cache_on_update' ), 10, 1 );
+	}
+
+	/**
+	 * Purge product cache when order stock is reduced (purchase).
+	 *
+	 * @since  2.3.5
+	 * @global object $nginx_purger Nginx purger object.
+	 * @param  object $order Order object.
+	 */
+	public function purge_product_cache_on_purchase( $order ) {
+
+		global $nginx_purger;
+
+		if ( ! $order instanceof WC_Order ) {
+			return;
+		}
+
+		if ( ! $this->options['enable_purge'] ) {
+			return;
+		}
+
+		$nginx_purger->log( 'WooCommerce order stock reduction - purging product caches' );
+
+		foreach ( $order->get_items() as $item ) {
+			$product = $item->get_product();
+			if ( ! $product ) {
+				continue;
+			}
+
+			$product_id = $product->get_id();
+			$nginx_purger->log( 'Purging cache for product ID: ' . $product_id . ' due to purchase' );
+
+			$product_url = get_permalink( $product_id );
+
+			if ( $product_url ) {
+				$nginx_purger->purge_url( $product_url );
+			}
+		}
+	}
+
+	/**
+	 * Purge product cache when a product is updated via REST API.
+	 *
+	 * @since 2.3.5
+	 * @global object $nginx_purger Nginx purger object.
+	 * @param int $product_id Product ID.
+	 */
+	public function purge_product_cache_on_update( $product_id ) {
+		global $nginx_purger;
+
+		if ( empty( $nginx_purger ) ) { 
+			return; 
+		}
+
+		if ( ! $this->options['enable_purge'] ) {
+			return;
+		}
 	
+		$nginx_purger->log( 'WooCommerce product update - purging cache for product ID: ' . $product_id );
+	
+		$product_url = get_permalink( $product_id );
+	
+		if ( $product_url ) {
+			$nginx_purger->purge_url( $product_url );
+		}
+	}
 	
 }

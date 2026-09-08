@@ -77,7 +77,7 @@ class Nginx_Helper {
 	public function __construct() {
 
 		$this->plugin_name = 'nginx-helper';
-		$this->version     = '2.3.5';
+		$this->version     = '2.4.0';
 		$this->minimum_wp  = '3.0';
 
 		if ( ! $this->required_wp_version() ) {
@@ -87,6 +87,15 @@ class Nginx_Helper {
 		if ( ! defined( 'RT_WP_NGINX_HELPER_CACHE_PATH' ) ) {
 			$cache_path = apply_filters( 'rt_wp_nginx_helper_cache_path', '/var/run/nginx-cache' );
 			define( 'RT_WP_NGINX_HELPER_CACHE_PATH', $cache_path  );
+		}
+
+		/**
+		 * Flag to automatically purge Nginx cache on any WordPress update (core, plugin, theme).
+		 * Set to true to enable auto-purge; false to disable.
+		 */
+		if ( ! defined( 'NGINX_HELPER_AUTO_PURGE_ON_ANY_UPDATE' ) ) {
+			$enabled = (bool) apply_filters( 'rt_wp_nginx_helper_enable_auto_purge_on_any_update', false );
+			define( 'NGINX_HELPER_AUTO_PURGE_ON_ANY_UPDATE', $enabled );
 		}
 
 		$this->load_dependencies();
@@ -155,7 +164,7 @@ class Nginx_Helper {
 		$plugin_i18n = new Nginx_Helper_i18n();
 		$plugin_i18n->set_domain( $this->get_plugin_name() );
 
-		$this->loader->add_action( 'plugins_loaded', $plugin_i18n, 'load_plugin_textdomain' );
+		$this->loader->add_action( 'init', $plugin_i18n, 'load_plugin_textdomain' );
 
 	}
 
@@ -221,6 +230,7 @@ class Nginx_Helper {
 		$this->loader->add_action( 'edit_attachment', $nginx_purger, 'purge_image_on_edit', 100, 1 );
 		$this->loader->add_action( 'wpmu_new_blog', $nginx_helper_admin, 'update_new_blog_options', 10, 1 );
 		$this->loader->add_action( 'transition_post_status', $nginx_purger, 'purge_on_post_moved_to_trash', 20, 3 );
+		$this->loader->add_action( 'before_delete_post', $nginx_purger, 'purge_on_before_delete_post', 20, 2 );
 		$this->loader->add_action( 'edit_term', $nginx_purger, 'purge_on_term_taxonomy_edited', 20, 3 );
 		$this->loader->add_action( 'delete_term', $nginx_purger, 'purge_on_term_taxonomy_edited', 20, 3 );
 		$this->loader->add_action( 'check_ajax_referer', $nginx_purger, 'purge_on_check_ajax_referer', 20 );
@@ -232,6 +242,18 @@ class Nginx_Helper {
 		// add action to preload the cache
 		$this->loader->add_action( 'admin_init', $nginx_helper_admin, 'preload_cache' );
 		$this->loader->add_action( 'plugins_loaded', $this, 'handle_nginx_helper_upgrade' );
+
+		// add action to update purge caps.
+		$this->loader->add_action( 'update_site_option_rt_wp_nginx_helper_options', $nginx_helper_admin, 'nginx_helper_update_role_caps' );
+
+		// advance purge settings.
+		$this->loader->add_action( 'upgrader_process_complete', $nginx_helper_admin, 'nginx_helper_auto_purge_on_any_update', 10, 2 );
+		$this->loader->add_action( 'admin_notices', $nginx_helper_admin, 'suggest_purge_after_update' );
+		$this->loader->add_action( 'admin_init', $nginx_helper_admin, 'dismiss_suggest_purge_after_update' );
+
+		// WooCommerce integration.
+		$this->loader->add_action( 'plugins_loaded', $nginx_helper_admin, 'init_woocommerce_hooks' );
+
 	}
 
 	/**
